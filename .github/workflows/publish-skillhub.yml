@@ -28,7 +28,20 @@ jobs:
 
       - name: Install SkillHub CLI
         run: |
-          curl -fsSL https://skillhub.cn/install/install.sh | bash -s -- --cli-only
+          set -euo pipefail
+          tmp="$(mktemp -d)"
+          for attempt in 1 2 3 4 5; do
+            if curl -fsSL --retry 3 --retry-delay 3 \
+              "https://skillhub-1388575217.cos.ap-guangzhou.myqcloud.com/install/latest.tar.gz" \
+              -o "$tmp/latest.tar.gz"; then
+              break
+            fi
+            echo "Attempt ${attempt}/5: download failed, retrying."
+            sleep 10
+          done
+          test -s "$tmp/latest.tar.gz"
+          tar -xzf "$tmp/latest.tar.gz" -C "$tmp"
+          bash "$tmp/cli/install.sh" --cli-only
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Login SkillHub
