@@ -1,0 +1,56 @@
+name: Publish SkillHub Skill
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: skillhub-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read and validate skill metadata
+        id: metadata
+        run: |
+          python3 -m pip install PyYAML
+          python3 .github/scripts/release-metadata.py
+
+      - name: Install SkillHub CLI
+        run: |
+          curl -fsSL https://skillhub.cn/install/install.sh | bash -s -- --cli-only
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Login SkillHub
+        env:
+          SKILLHUB_API_KEY: ${{ secrets.SKILLHUB_API_KEY }}
+        run: |
+          test -n "$SKILLHUB_API_KEY" || {
+            echo "::error::Missing GitHub Actions secret: SKILLHUB_API_KEY"
+            exit 1
+          }
+          skillhub --skip-self-upgrade login --key "$SKILLHUB_API_KEY" --host https://api.skillhub.cn
+          skillhub --skip-self-upgrade auth whoami
+
+      - name: Prepare skill package
+        run: |
+          mkdir -p "$RUNNER_TEMP/skill"
+          cp -R SKILL.md references "$RUNNER_TEMP/skill/"
+
+      - name: Dry run
+        run: skillhub --skip-self-upgrade publish "$RUNNER_TEMP/skill" --dry-run --json
+
+      - name: Publish
+        env:
+          SKILL_VERSION: ${{ steps.metadata.outputs.version }}
+        run: skillhub --skip-self-upgrade publish "$RUNNER_TEMP/skill" --changelog "Release v${SKILL_VERSION}" --json

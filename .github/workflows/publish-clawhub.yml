@@ -1,0 +1,111 @@
+name: Publish ClawHub Skill
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: clawhub-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read and validate skill metadata
+        id: metadata
+        run: |
+          python3 -m pip install PyYAML
+          python3 .github/scripts/release-metadata.py
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install ClawHub CLI
+        run: npm install --global clawhub@0.23.1
+
+      - name: Login to ClawHub
+        env:
+          CLAWHUB_TOKEN: ${{ secrets.CLAWHUB_TOKEN }}
+        run: |
+          test -n "$CLAWHUB_TOKEN" || {
+            echo "::error::Missing GitHub Actions secret: CLAWHUB_TOKEN"
+            exit 1
+          }
+          clawhub login --token "$CLAWHUB_TOKEN" --label "GitHub Actions"
+          clawhub whoami
+
+      - name: Check version is unpublished
+        env:
+          SKILL_VERSION: ${{ steps.metadata.outputs.version }}
+          SKILL_SLUG: ${{ steps.metadata.outputs.slug }}
+        run: |
+          set +e
+          result="$(clawhub inspect "$SKILL_SLUG" --version "$SKILL_VERSION" --json 2>&1)"
+          status=$?
+          set -e
+          if [[ "$status" -eq 0 ]]; then
+            echo "::error::ClawHub version ${SKILL_VERSION} already exists"
+            exit 1
+          fi
+          if ! grep -Eq 'Version not found|Skill not found' <<<"$result"; then
+            echo "$result"
+            exit "$status"
+          fi
+
+      - name: Prepare skill package
+        run: |
+          mkdir -p "$RUNNER_TEMP/skill"
+          cp -R SKILL.md references "$RUNNER_TEMP/skill/"
+
+      - name: Dry run
+        env:
+          SKILL_VERSION: ${{ steps.metadata.outputs.version }}
+          SKILL_SLUG: ${{ steps.metadata.outputs.slug }}
+          SKILL_NAME: ${{ steps.metadata.outputs.name }}
+        run: |
+          clawhub skill publish "$RUNNER_TEMP/skill" \
+            --slug "$SKILL_SLUG" --name "$SKILL_NAME" --version "$SKILL_VERSION" \
+            --changelog "Release v${SKILL_VERSION}" --tags latest \
+            --source-repo "https://github.com/${GITHUB_REPOSITORY}" \
+            --source-commit "$GITHUB_SHA" --source-ref "$GITHUB_REF_NAME" \
+            --source-path "." --dry-run --json
+
+      - name: Publish
+        env:
+          SKILL_VERSION: ${{ steps.metadata.outputs.version }}
+          SKILL_SLUG: ${{ steps.metadata.outputs.slug }}
+          SKILL_NAME: ${{ steps.metadata.outputs.name }}
+        run: |
+          clawhub skill publish "$RUNNER_TEMP/skill" \
+            --slug "$SKILL_SLUG" --name "$SKILL_NAME" --version "$SKILL_VERSION" \
+            --changelog "Release v${SKILL_VERSION}" --tags latest \
+            --source-repo "https://github.com/${GITHUB_REPOSITORY}" \
+            --source-commit "$GITHUB_SHA" --source-ref "$GITHUB_REF_NAME" \
+            --source-path "." --json
+
+      - name: Wait for public version
+        env:
+          SKILL_VERSION: ${{ steps.metadata.outputs.version }}
+          SKILL_SLUG: ${{ steps.metadata.outputs.slug }}
+        run: |
+          for attempt in {1..90}; do
+            result="$(clawhub inspect "$SKILL_SLUG" --version "$SKILL_VERSION" --json 2>/dev/null)" || true
+            if jq -e --arg version "$SKILL_VERSION" '.version.version == $version' <<<"$result" >/dev/null 2>&1; then
+              echo "ClawHub version ${SKILL_VERSION} is public."
+              exit 0
+            fi
+            echo "Attempt ${attempt}/90: publication pending."
+            sleep 30
+          done
+          echo "::error::ClawHub publication did not become public within 45 minutes."
+          exit 1

@@ -1,0 +1,59 @@
+name: Refresh skills.sh
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read and validate skill metadata
+        id: metadata
+        run: |
+          python3 -m pip install PyYAML
+          python3 .github/scripts/release-metadata.py
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install from GitHub through skills CLI
+        env:
+          SKILL_SLUG: ${{ steps.metadata.outputs.slug }}
+        run: >-
+          npx --yes skills add "$GITHUB_REPOSITORY"
+          --skill "$SKILL_SLUG" --agent codex --copy --yes
+
+      - name: Verify installed skill matches release
+        env:
+          SKILL_SLUG: ${{ steps.metadata.outputs.slug }}
+        run: |
+          installed_skill=".agents/skills/$SKILL_SLUG/SKILL.md"
+          test -s "$installed_skill"
+          cmp SKILL.md "$installed_skill"
+
+      - name: Verify skills.sh page
+        env:
+          SKILL_SLUG: ${{ steps.metadata.outputs.slug }}
+        run: |
+          page_url="https://www.skills.sh/${GITHUB_REPOSITORY}/${SKILL_SLUG}"
+          for attempt in {1..20}; do
+            page="$(curl -fsSL --max-time 30 "${page_url}?refresh=${GITHUB_SHA}")" || true
+            if grep -Fq "${SKILL_SLUG}" <<<"$page" && grep -Fq 'SKILL.md' <<<"$page"; then
+              echo "skills.sh is serving ${page_url}."
+              exit 0
+            fi
+            echo "Attempt ${attempt}/20: skills.sh indexing pending."
+            sleep 30
+          done
+          echo "::error::skills.sh detail page was not ready within 10 minutes."
+          exit 1
